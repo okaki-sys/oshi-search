@@ -376,11 +376,12 @@ async function api(path, body) {
       // 概要欄の全文・タグ・長さ・再生回数をまとめて取得(50件で1ユニット)。名前での絞り込みに使う
       try {
         if (items.length) {
-          const r2 = await fetch(YT + '/videos?' + new URLSearchParams({ part: 'snippet,contentDetails,statistics', id: items.map(v => v.id).join(','), key: cfg.ytKey }));
+          const r2 = await fetch(YT + '/videos?' + new URLSearchParams({ part: 'snippet,contentDetails,statistics,liveStreamingDetails', id: items.map(v => v.id).join(','), key: cfg.ytKey }));
           if (r2.ok) {
             const byId = new Map(((await r2.json()).items || []).map(it => [it.id, it]));
             for (const v of items) {
               const d = byId.get(v.id); if (!d) continue;
+              v.wasLive = !!d.liveStreamingDetails;   // ライブ配信(またはプレミア公開)だった動画
               const sn = d.snippet || {}; v.desc = (sn.description || '') + ' ' + (sn.tags || []).join(' ');
               const m = /^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec((d.contentDetails || {}).duration || '');
               if (m) v.duration = (+m[1] || 0) * 86400 + (+m[2] || 0) * 3600 + (+m[3] || 0) * 60 + (+m[4] || 0);
@@ -584,22 +585,36 @@ const ymd = d => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.g
 // 空白区切りの語がすべて含まれるか(かな/カナ・全角半角の違いは無視)
 const textHit = (s, text) => { const t = norm(s); return (text || '').split(/\s+/).map(norm).filter(Boolean).every(w => t.includes(w)); };
 
+// ---- ショート動画の判定と、ショート用の別枠
+// 60秒以下、または3分以下で #shorts が付いているものをショートとみなす(縦長かどうかは API からは分からない)
+const isShort = v => v.duration > 0 && (v.duration <= 60 || (v.duration <= 180 && /#\s*shorts?\b/i.test(v.title + ' ' + (v.desc || ''))));
+function shortsSection(title) {
+  const small = el('small', { textContent: '' }), grid = el('div', { className: 'grid' });
+  const box = el('section', { hidden: true }, el('h2', {}, title + ' ', small), grid);
+  $('#results').append(box);
+  const sec = { kind: 'shorts', items: [], grid, done: false, label() { small.textContent = sec.items.length + '件'; box.hidden = !sec.items.length; } };
+  sections.push(sec);
+  return sec;
+}
+
 async function runKind(kind, q) {
   const small = el('small', { textContent: '検索中…' }), head = el('h2', {}, KINDS[kind] + ' ', small);
   const grid = el('div', { className: 'grid' }), more = el('div', { className: 'more' });
   $('#results').append(el('section', {}, head, grid, more));
   const sec = { kind, items: [], grid, done: false };
   sections.push(sec);
+  const sh = kind === 'clip' ? shortsSection('YouTube 切り抜きショート') : null;   // ショートは別枠
+  const cnt = () => sec.items.length + (sh ? sh.items.length : 0);
   let offset = 0, total = null, end = false, busy = false, stop = false, goal = 0, skipped = 0;
   const r = q.range, ranged = r.from != null || r.to != null;
   // 取得順。新しい順/古い順はそのまま。それ以外の並びでは、期間に早く届くほうから読む
   const dir = q.userSort === 'oldest' ? 'oldest' : q.userSort === 'newest' || !ranged ? 'newest'
     : r.to == null ? 'newest' : r.from == null ? 'oldest' : (Date.now() - r.to <= r.from - Date.UTC(2017, 0, 1) ? 'newest' : 'oldest');
-  const label = () => { const n = sec.items.length; small.textContent = kind === 'live' ? n + '件' : ranged ? n + '件(期間内)' + (busy && skipped ? ' ・期間外 ' + skipped + '件を読み飛ばし中…' : '') : total == null ? n + '件' : n + ' / ' + total + '件'; };
+  const label = () => { const n = cnt(); if (sh) sh.label(); small.textContent = (sh && sh.items.length ? 'ショート以外 ' + sec.items.length + '件 ／ 合計 ' : '') + (kind === 'live' ? n + '件' : ranged ? n + '件(期間内)' + (busy && skipped ? ' ・期間外 ' + skipped + '件を読み飛ばし中…' : '') : total == null ? n + '件' : n + ' / ' + total + '件'); };
   const controls = () => {
     more.replaceChildren();
     if (busy) { const b = el('button', { textContent: '読み込みを中止' }); b.onclick = () => { stop = true; }; more.append(el('span', { className: 'muted', textContent: '読み込み中… ' }), b); }
-    else if (!end) { const b = el('button', { textContent: 'さらに' + (countSel === 'all' ? '全件' : countSel + '件') + '読み込む' }); b.onclick = () => sec.loadTo(sec.items.length + targetCount()); more.append(b); }
+    else if (!end) { const b = el('button', { textContent: 'さらに' + (countSel === 'all' ? '全件' : countSel + '件') + '読み込む' }); b.onclick = () => sec.loadTo(cnt() + targetCount()); more.append(b); }
   };
   // 合計 n 件になるまで、30件ずつ続けて読み込む
   sec.loadTo = async n => {
@@ -607,7 +622,7 @@ async function runKind(kind, q) {
     if (busy || end) return;
     busy = true; stop = false; controls();
     try {
-      while (!end && !stop && sec.items.length < goal) {
+      while (!end && !stop && cnt() < goal) {
         const res = await api('/api/search', { ...q, sort: dir, kind, offset });
         let items = res.items;
         if (kind === 'live') items = items.filter(v => textHit(v.title + ' ' + v.topic, q.text));
@@ -615,20 +630,21 @@ async function runKind(kind, q) {
         const past = v => { const n = tms(v); return n != null && (dir === 'newest' ? r.from != null && n < r.from : r.to != null && n > r.to); };
         const beyond = kind !== 'live' && ranged && items.length > 0 && items.every(past);
         const inside = items.filter(v => inRange(v, r)); skipped += items.length - inside.length; items = inside;
-        const have = new Set(sec.items.map(v => v.id));
-        sec.items.push(...items.filter(v => !have.has(v.id))); sec.done = true;
+        const have = new Set([...sec.items, ...(sh ? sh.items : [])].map(v => v.id)), fresh = items.filter(v => !have.has(v.id));
+        sec.items.push(...fresh.filter(v => !sh || !isShort(v))); sec.done = true;
+        if (sh) { sh.items.push(...fresh.filter(isShort)); sh.done = true; paint(sh); fillViews(sh); }
         const got = res.fetched ?? res.items.length; offset += got;
         if (kind !== 'live') total = res.total;
         end = kind === 'live' || beyond || got === 0 || (total == null ? got < 30 : offset >= total);
         paint(sec); fillViews(sec); label();
-        if (!end && sec.items.length < goal) await sleep(150);
+        if (!end && cnt() < goal) await sleep(150);
       }
     } catch (e) {
       busy = false; controls(); label();
       more.append(el('div', { className: 'err', textContent: e.message }));
       return;
     }
-    busy = false; goal = sec.items.length; controls(); label();
+    busy = false; goal = cnt(); controls(); label();
   };
   await sec.loadTo(targetCount());
 }
@@ -654,29 +670,34 @@ async function runYtClip(q) {
   $('#results').append(el('section', {}, head, note, grid, more));
   const sec = { kind: 'ytclip', items: [], grid, done: false };
   sections.push(sec);
+  const sh = shortsSection('YouTube 切り抜きショート(YouTube検索)');   // ショートは別枠
   let all = [], strict = true, token = '', end = false, busy = false;
   const tokens = q.ids.map(clipTokens);
   // 絞り込み: 選んだ全員の名前と「内容」の語が、タイトル・概要欄・タグのどこかにあるものだけ残す
-  const hit = v => { const t = v.title + ' ' + (v.desc || ''); return tokens.every(ts => titleHas(t, ts)) && textHit(t, q.text); };
+  // VTuber 本人(Holodex に登録のあるチャンネル)の配信アーカイブは切り抜きではないので外す。本人が投稿した動画(ショートなど)は残す
+  const isArchive = v => byId.has(v.channel.id) && (v.wasLive ?? true);
+  const hit = v => { const t = v.title + ' ' + (v.desc || ''); return !isArchive(v) && tokens.every(ts => titleHas(t, ts)) && textHit(t, q.text); };
   const apply = () => {
-    sec.items = strict ? all.filter(hit) : all; sec.done = true; paint(sec);
-    const cut = all.length - sec.items.length;
+    const shown = strict ? all.filter(hit) : all;
+    sec.items = shown.filter(v => !isShort(v)); sec.done = true; paint(sec);
+    sh.items = shown.filter(isShort); sh.done = true; paint(sh); sh.label();
+    const cut = all.length - shown.length;
     small.textContent = sec.items.length + '件';
-    note.replaceChildren('検索語: ' + ytQuery(q) + ' ／ ' + (strict ? '名前' + (q.text ? 'と内容' : '') + 'がタイトル・概要欄・タグにあるものだけ表示' + (cut ? '(' + cut + '件を除外) ' : ' ') : 'YouTube の検索結果をすべて表示中 '));
+    note.replaceChildren('検索語: ' + ytQuery(q) + ' ／ ' + (strict ? '名前' + (q.text ? 'と内容' : '') + 'がタイトル・概要欄・タグにあるものだけ表示。本人チャンネルの配信アーカイブは除外' + (cut ? '(' + cut + '件を除外) ' : ' ') : 'YouTube の検索結果をすべて表示中 '));
     if (strict ? cut > 0 : true) { const b = el('button', { textContent: strict ? '除外した分も表示' : '名前が一致するものだけに戻す', style: 'padding:2px 10px' }); b.onclick = () => { strict = !strict; apply(); }; note.append(b); }
   };
-  const controls = () => { more.replaceChildren(); if (!busy && !end) { const b = el('button', { textContent: 'さらに読み込む(検索1回分)' }); b.onclick = () => sec.loadTo(sec.items.length + 1, 1); more.append(b); } };
+  const controls = () => { more.replaceChildren(); if (!busy && !end) { const b = el('button', { textContent: 'さらに読み込む(検索1回分)' }); b.onclick = () => sec.loadTo(sec.items.length + sh.items.length + 1, 1); more.append(b); } };
   // 1回の検索で最大50件。YouTube の検索は1日100回までなので、一度に読むのは4回まで
   sec.loadTo = async (n, max = 4) => {
     if (busy || end) return;
     busy = true; controls();
     try {
-      for (let i = 0; i < max && !end && sec.items.length < n; i++) {
+      for (let i = 0; i < max && !end && sec.items.length + sh.items.length < n; i++) {
         const r = await api('/api/ytsearch', { q: ytQuery(q), token, from: q.range.from, to: q.range.to });
         const have = new Set(all.map(v => v.id));
         all.push(...r.items.filter(v => !have.has(v.id)).map(v => ({ ...v, title: decodeHtml(v.title) })));
         token = r.next || ''; end = !token || !r.items.length;
-        apply(); fillViews(sec);
+        apply(); fillViews(sec); fillViews(sh);
       }
     } catch (e) { busy = false; apply(); controls(); more.append(el('div', { className: 'err', textContent: e.message })); return; }
     busy = false; apply(); controls();
