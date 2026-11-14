@@ -118,6 +118,7 @@ input[type=date],input[type=time]{font:inherit;color:inherit;background:var(--bg
     <label><input type="checkbox" class="kind" value="live" checked> 配信中・予定</label>
     <label><input type="checkbox" class="kind" value="archive" checked> アーカイブ</label>
     <label><input type="checkbox" class="kind" value="clip"> 切り抜き</label>
+    <label title="YouTube の検索で探すので、Holodex に登録のない切り抜きも見つかります(1日100回まで)"><input type="checkbox" id="ytc"> 切り抜き(YouTube検索)</label>
     <label><input type="checkbox" id="tw"> Twitch</label>
     <span class="muted">|</span>
     <label>切り抜きの言語 <select id="lang"><option value="ja">日本語</option><option value="en">英語</option><option value="ja,en">日本語+英語</option></select></label>
@@ -147,7 +148,7 @@ input[type=date],input[type=time]{font:inherit;color:inherit;background:var(--bg
     <button class="primary" id="go">検索</button>
   </div>
   <div id="ytPanel" hidden style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
-    <div><b>YouTube の再生回数を使うには、Google の APIキー(無料)が必要です</b></div>
+    <div><b>YouTube の再生回数や「切り抜き(YouTube検索)」を使うには、Google の APIキー(無料)が必要です</b></div>
     <div class="muted">Holodex は再生回数を持っていないため、YouTube 公式 API から取得します。設定しない場合、再生回数順は Twitch の結果にだけ効きます。</div>
     <ol class="muted" style="margin:6px 0;padding-left:20px">
       <li>https://console.cloud.google.com/ に Google アカウントでログインし、プロジェクトを新規作成する</li>
@@ -360,6 +361,19 @@ async function api(path, body) {
     case '/api/twitch': return searchTwitch(body.logins || [], body.limit);
     case '/api/youtube_key': { const k = String(body.key || '').trim(); if (!k) fail('キーが空です。'); await ytViews(['jNQXAC9IVRw'], k); cfg.ytKey = k; saveCfg(); return { ok: true }; }
     case '/api/views': return { views: await ytViews(body.ids || []) };
+    case '/api/ytsearch': {   // YouTube の動画検索 (1回でクォータの検索枠を1消費。1日100回まで)
+      if (!cfg.ytKey) fail('YouTube のキーが未設定です。');
+      const p = { part: 'snippet', type: 'video', maxResults: 50, q: body.q || '', order: 'relevance', regionCode: 'JP', relevanceLanguage: 'ja', key: cfg.ytKey };
+      if (body.token) p.pageToken = body.token;
+      if (body.from != null) p.publishedAfter = new Date(body.from).toISOString();
+      if (body.to != null) p.publishedBefore = new Date(body.to).toISOString();
+      let res; try { res = await fetch(YT + '/search?' + new URLSearchParams(p)); } catch { fail('YouTube に接続できません。'); }
+      if (!res.ok) { const t = await res.text(); fail(/quota/i.test(t) ? 'YouTube 検索の本日分の利用枠(1日100回)を使い切りました。明日また使えます。' : 'YouTube 検索に失敗しました (HTTP ' + res.status + ')。'); }
+      const j = await res.json();
+      return { next: j.nextPageToken || '', items: (j.items || []).filter(it => it.id && it.id.videoId).map(it => { const sn = it.snippet || {}; return {
+        id: it.id.videoId, title: sn.title || '', status: 'past', type: 'clip', topic: '', time: sn.publishedAt || '', duration: 0, views: null,
+        channel: { id: sn.channelId || '', name: sn.channelTitle || '', photo: '' }, mentions: [] }; }) };
+    }
   }
   fail('not found');
 }
@@ -530,7 +544,7 @@ async function fillViews(sec) {
     paint(sec);
   } catch (e) { $('#err').textContent = e.message; }
 }
-function renderYt() { $('#ytPanel').hidden = !($('#sort').value === 'views' && !hasYoutube); }
+function renderYt() { $('#ytPanel').hidden = !(($('#sort').value === 'views' || $('#ytc').checked) && !hasYoutube); }
 
 const ALL_CAP = 5000;   // 「全件」の安全上限
 let countSel = store.get('count', '30');
@@ -598,6 +612,39 @@ async function runKind(kind, q) {
       return;
     }
     busy = false; goal = sec.items.length; controls(); label();
+  };
+  await sec.loadTo(targetCount());
+}
+
+// ---- 切り抜き(YouTube検索): Holodex に登録のない切り抜きチャンネルの動画も探す
+const decodeHtml = t => { const d = document.createElement('textarea'); d.innerHTML = t; return d.value; };
+// 検索語: 選んだメンバーの名前 + 内容 + 「切り抜き」
+// 切り抜きのタイトルは短い呼び名で書かれることが多いので、「フレン・E・ルスタリオ」は「フレン」で探す
+const ytName = id => { const n = shortName((known[id] || {}).name || '').replace(/\s*[-–|].*$/, ''), first = n.split(/[・･]/)[0].trim(); return first.length >= 2 ? first : n; };
+const ytQuery = q => [...q.ids.map(id => ytName(id)), q.text, '切り抜き'].filter(Boolean).join(' ');
+async function runYtClip(q) {
+  const small = el('small', { textContent: '検索中…' }), head = el('h2', {}, 'YouTube 切り抜き(YouTube検索) ', small);
+  const note = el('div', { className: 'muted', textContent: '検索語: ' + ytQuery(q) + ' ／ YouTube の検索結果そのままなので、関係の薄い動画が混ざることがあります' });
+  const grid = el('div', { className: 'grid' }), more = el('div', { className: 'more' });
+  $('#results').append(el('section', {}, head, note, grid, more));
+  const sec = { kind: 'ytclip', items: [], grid, done: false };
+  sections.push(sec);
+  let token = '', end = false, busy = false;
+  const controls = () => { more.replaceChildren(); if (!busy && !end) { const b = el('button', { textContent: 'さらに読み込む(検索1回分)' }); b.onclick = () => sec.loadTo(sec.items.length + 50); more.append(b); } };
+  // 1回の検索で最大50件。YouTube の検索は1日100回までなので、一度に読むのは4回(約200件)まで
+  sec.loadTo = async n => {
+    if (busy || end) return;
+    busy = true; controls();
+    try {
+      for (let i = 0; i < 4 && !end && sec.items.length < n; i++) {
+        const r = await api('/api/ytsearch', { q: ytQuery(q), token, from: q.range.from, to: q.range.to });
+        const have = new Set(sec.items.map(v => v.id));
+        sec.items.push(...r.items.filter(v => !have.has(v.id)).map(v => ({ ...v, title: decodeHtml(v.title) }))); sec.done = true;
+        token = r.next || ''; end = !token || !r.items.length;
+        paint(sec); fillViews(sec); small.textContent = sec.items.length + '件';
+      }
+    } catch (e) { more.append(el('div', { className: 'err', textContent: e.message })); small.textContent = sec.items.length + '件'; busy = false; return; }
+    busy = false; small.textContent = sec.items.length + '件'; controls();
   };
   await sec.loadTo(targetCount());
 }
@@ -670,7 +717,10 @@ async function search() {
   if (!picked.length && !text && !topic) { $('#err').textContent = 'メンバーを選ぶか、内容(ゲーム名・企画名など)を入力してください。'; return; }
   const kinds = [...document.querySelectorAll('.kind:checked')].map(c => c.value);
   const tw = $('#tw').checked && picked.length > 0;   // Twitch はメンバー指定があるときだけ
-  if (!kinds.length && !tw) { $('#err').textContent = $('#tw').checked && !picked.length ? 'Twitch はメンバーを選んだときだけ検索できます。YouTube の対象を選ぶか、メンバーを選んでください。' : '対象を1つ以上選んでください。'; return; }
+  const ytc = $('#ytc').checked;
+  if (ytc && !hasYoutube) { $('#ytPanel').hidden = false; $('#err').textContent = '「切り抜き(YouTube検索)」には YouTube の APIキーが必要です。下の欄で設定するか、チェックを外してください。'; return; }
+  if (ytc && !picked.length && !text) { $('#err').textContent = '「切り抜き(YouTube検索)」は、メンバーを選ぶか「内容」を入力したときに使えます。'; return; }
+  if (!kinds.length && !tw && !ytc) { $('#err').textContent = $('#tw').checked && !picked.length ? 'Twitch はメンバーを選んだときだけ検索できます。YouTube の対象を選ぶか、メンバーを選んでください。' : '対象を1つ以上選んでください。'; return; }
   if (tw && !hasTwitch) { $('#err').textContent = 'Twitch のキーを設定するか、Twitch のチェックを外してください。'; return; }
   // メンバー未選択のときは、グループ欄を検索範囲として使う
   const q = { ids: picked, text, topic, org: picked.length ? '' : $('#org').value, sort: $('#sort').value === 'oldest' ? 'oldest' : 'newest', userSort: $('#sort').value, range: getRange(), langs: $('#lang').value.split(',') };
@@ -678,7 +728,7 @@ async function search() {
   $('#results').replaceChildren(); sections = [];
   if (!picked.length) $('#results').append(el('div', { className: 'muted', style: 'margin-top:16px', textContent: '内容だけで検索中(範囲: ' + (q.org || 'すべてのグループ') + ')' + ($('#tw').checked ? '。Twitch はメンバーを選んだときだけ検索します' : '') }));
   $('#go').disabled = true;
-  await Promise.all([...kinds.map(k => runKind(k, q)), ...(tw ? [runTwitch(q)] : [])]);
+  await Promise.all([...kinds.map(k => runKind(k, q)), ...(ytc ? [runYtClip(q)] : []), ...(tw ? [runTwitch(q)] : [])]);
   $('#go').disabled = false;
 }
 
@@ -713,6 +763,8 @@ $('#ytSave').onclick = async () => {
   try { await api('/api/youtube_key', { key: $('#ytKey').value }); $('#ytKey').value = ''; $('#ytErr').textContent = ''; hasYoutube = true; renderYt(); sections.forEach(fillViews); }
   catch (e) { $('#ytErr').textContent = e.message; }
 };
+$('#ytc').checked = store.get('ytc', false);
+$('#ytc').onchange = () => { store.set('ytc', $('#ytc').checked); renderYt(); };
 $('#tw').onchange = () => { store.set('tw', $('#tw').checked); renderTwitch(); };
 $('#twReset').onclick = () => { hasTwitch = false; renderTwitch(); };
 $('#twSave').onclick = async () => {
