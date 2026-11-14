@@ -114,7 +114,10 @@ label{display:inline-flex;gap:5px;align-items:center;cursor:pointer}
     <span class="muted">アーカイブ・切り抜き・Twitch過去配信それぞれの件数。検索後に押すと、その件数まで追加で読み込みます</span>
   </div>
   <div class="row">
-    <input type="text" id="text" placeholder="タイトルのキーワード(任意)" style="flex:1">
+    <b>内容</b>
+    <input type="text" id="text" placeholder="ゲーム名・企画名など(スペース区切りで複数可)" style="flex:1">
+    <input type="text" id="topic" list="topics" placeholder="トピック(任意・例: Apex_Legends)" hidden>
+    <datalist id="topics"></datalist>
     <button class="primary" id="go">検索</button>
   </div>
   <div id="ytPanel" hidden style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
@@ -218,21 +221,25 @@ const normVideo = v => { const ch = v.channel || {}; return {
   views: v.status === 'live' ? (v.live_viewers ?? null) : null,
   channel: { id: ch.id || v.channel_id || '', name: ch.name || '', photo: ch.photo || '' },
   mentions: (v.mentions || []).map(m => m.id).filter(Boolean) }; };
-// 配信中・配信予定。1人目の出演枠を集め、残り全員が含まれるものだけ残す
-async function searchLive(ids) {
+// 配信中・配信予定。メンバー指定あり: 1人目の出演枠から全員が含まれるものだけ。指定なし: グループとトピックで絞った一覧
+async function searchLive(ids, org, topic) {
   const found = new Map();
-  for (const cond of [{ channel_id: ids[0] }, { mentioned_channel_id: ids[0] }]) {
-    const res = await hx('/live', { include: 'mentions', limit: 50, max_upcoming_hours: 336, ...cond });
-    for (const v of Array.isArray(res) ? res : res.items || []) found.set(v.id, normVideo(v));
+  const conds = ids.length ? [{ channel_id: ids[0] }, { mentioned_channel_id: ids[0] }] : [0, 50, 100, 150, 200, 250].map(offset => ({ offset }));
+  for (const cond of conds) {
+    const p = { include: 'mentions', limit: 50, max_upcoming_hours: 336, ...cond };
+    if (!ids.length) { if (org) p.org = org; if (topic) p.topic = topic; }
+    const res = await hx('/live', p), page = Array.isArray(res) ? res : res.items || [];
+    for (const v of page) found.set(v.id, normVideo(v));
+    if (!ids.length && page.length < 50) break;
   }
-  const out = [...found.values()].filter(v => ['live', 'upcoming'].includes(v.status) && ids.every(i => i === v.channel.id || v.mentions.includes(i)));
+  const out = [...found.values()].filter(v => ['live', 'upcoming'].includes(v.status) && (!topic || v.topic.toLowerCase() === topic.toLowerCase()) && ids.every(i => i === v.channel.id || v.mentions.includes(i)));
   out.sort((a, b) => (a.status !== 'live') - (b.status !== 'live') || a.time.localeCompare(b.time));
   return { items: out, total: out.length };
 }
-// アーカイブ / 切り抜き。videoSearch の vch は「指定した全員を含む」= AND 条件
-async function searchIndexed(ids, target, text, offset, sort, langs) {
+// アーカイブ / 切り抜き。vch は「指定した全員を含む」= AND 条件。text は空白区切りの語をすべて含むもの
+async function searchIndexed(ids, target, text, offset, sort, langs, org, topic) {
   const res = await hx('/search/videoSearch', null, { sort: sort === 'oldest' ? 'oldest' : 'newest', lang: langs && langs.length ? langs : ['ja'], target: [target],
-    conditions: text ? [{ text }] : [], topic: [], vch: ids, org: [], comment: [], paginated: true, offset, limit: PAGE_SIZE });
+    conditions: text.split(/\s+/).filter(Boolean).map(t => ({ text: t })), topic: topic ? [topic] : [], vch: ids, org: org && !ids.length ? [org] : [], comment: [], paginated: true, offset, limit: PAGE_SIZE });
   const raw = Array.isArray(res) ? res : res.items || [];
   let items = raw.map(normVideo);
   if (target === 'stream') items = items.filter(v => v.status === '' || v.status === 'past');
@@ -311,10 +318,12 @@ async function api(path, body) {
     case '/api/key': { const k = String(body.key || '').trim(); if (!k) fail('キーが空です。'); cfg.key = k; saveCfg(); return { ok: true }; }
     case '/api/channels': return { items: await getChannels(!!q.get('refresh')) };
     case '/api/channel': { try { const c = await hx('/channels/' + encodeURIComponent(q.get('id') || '')); return { twitch: (c && c.twitch) || '' }; } catch { return { twitch: '' }; } }
+    case '/api/topics': { try { const t = await hx('/topics'); return { items: t.filter(x => x && x.id).sort((a, b) => (b.count || 0) - (a.count || 0)).map(x => x.id).slice(0, 3000) }; } catch { return { items: [] }; } }
     case '/api/search': {
-      const ids = (body.ids || []).filter(Boolean).map(String); if (!ids.length) fail('メンバーを1人以上選んでください。');
-      if (body.kind === 'live') return searchLive(ids);
-      return searchIndexed(ids, body.kind === 'archive' ? 'stream' : 'clip', String(body.text || '').trim(), +body.offset || 0, body.sort, body.langs || []);
+      const ids = (body.ids || []).filter(Boolean).map(String), text = String(body.text || '').trim(), org = String(body.org || '').trim(), topic = String(body.topic || '').trim();
+      if (!ids.length && !text && !topic) fail('メンバーを選ぶか、内容(キーワードかトピック)を入力してください。');
+      if (body.kind === 'live') return searchLive(ids, org, topic);
+      return searchIndexed(ids, body.kind === 'archive' ? 'stream' : 'clip', text, +body.offset || 0, body.sort, body.langs || [], org, topic);
     }
     case '/api/twitch_key': {
       const id = String(body.id || '').trim(), secret = String(body.secret || '').trim(); if (!id || !secret) fail('Client ID と Client Secret の両方を入力してください。');
@@ -365,7 +374,7 @@ function matchScore(c, q) {
 
 function renderPicked() {
   const box = $('#picked'); box.replaceChildren();
-  if (!picked.length) box.append(el('span', { className: 'muted', textContent: '上の一覧からクリックで選択(★でお気に入り登録)' }));
+  if (!picked.length) box.append(el('span', { className: 'muted', textContent: '未選択。メンバーを選ばずに「内容」だけで検索することもできます(範囲は上のグループ欄)' }));
   picked.forEach(id => {
     const c = known[id] || { name: id, photo: '' };
     const x = el('button', { textContent: '×', title: '外す' });
@@ -478,6 +487,9 @@ const targetCount = () => countSel === 'all' ? ALL_CAP : +countSel;
 function renderCount() { document.querySelectorAll('#count button').forEach(b => b.classList.toggle('on', b.dataset.n === countSel)); }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// 空白区切りの語がすべて含まれるか(かな/カナ・全角半角の違いは無視)
+const textHit = (s, text) => { const t = norm(s); return (text || '').split(/\s+/).map(norm).filter(Boolean).every(w => t.includes(w)); };
+
 async function runKind(kind, q) {
   const small = el('small', { textContent: '検索中…' }), head = el('h2', {}, KINDS[kind] + ' ', small);
   const grid = el('div', { className: 'grid' }), more = el('div', { className: 'more' });
@@ -500,7 +512,7 @@ async function runKind(kind, q) {
       while (!end && !stop && sec.items.length < goal) {
         const r = await api('/api/search', { ...q, kind, offset });
         let items = r.items;
-        if (kind === 'live' && q.text) items = items.filter(v => v.title.toLowerCase().includes(q.text.toLowerCase()));
+        if (kind === 'live') items = items.filter(v => textHit(v.title + ' ' + v.topic, q.text));
         const have = new Set(sec.items.map(v => v.id));
         sec.items.push(...items.filter(v => !have.has(v.id))); sec.done = true;
         const got = r.fetched ?? r.items.length; offset += got;
@@ -565,7 +577,7 @@ async function runTwitch(q) {
       const u = res[twLogin(id)];
       if (!u || !u.found) { notes.push(shortName((known[id] || { name: id }).name) + ': アカウント「' + twLogin(id) + '」が見つかりません'); return; }
       const others = q.ids.filter(o => o !== id).map(nameTokens);
-      const ok = v => { const t = norm(v.title); return !seen.has(v.id) && (!kw || t.includes(kw)) && others.every(ts => titleHas(v.title, ts)); };
+      const ok = v => { return !seen.has(v.id) && textHit(v.title + ' ' + v.topic, q.text) && others.every(ts => titleHas(v.title, ts)); };
       if (u.live && ok(u.live)) { seen.add(u.live.id); lives.push(u.live); }
       u.videos.filter(ok).forEach(v => { seen.add(v.id); pasts.push(v); });
     });
@@ -583,13 +595,16 @@ async function runTwitch(q) {
 
 async function search() {
   $('#err').textContent = '';
-  if (!picked.length) { $('#err').textContent = 'メンバーを1人以上選んでください。'; return; }
+  const text = $('#text').value.trim(), topic = $('#topic').value.trim();
+  if (!picked.length && !text && !topic) { $('#err').textContent = 'メンバーを選ぶか、内容(ゲーム名・企画名など)を入力してください。'; return; }
   const kinds = [...document.querySelectorAll('.kind:checked')].map(c => c.value);
-  const tw = $('#tw').checked;
-  if (!kinds.length && !tw) { $('#err').textContent = '対象を1つ以上選んでください。'; return; }
+  const tw = $('#tw').checked && picked.length > 0;   // Twitch はメンバー指定があるときだけ
+  if (!kinds.length && !tw) { $('#err').textContent = $('#tw').checked && !picked.length ? 'Twitch はメンバーを選んだときだけ検索できます。YouTube の対象を選ぶか、メンバーを選んでください。' : '対象を1つ以上選んでください。'; return; }
   if (tw && !hasTwitch) { $('#err').textContent = 'Twitch のキーを設定するか、Twitch のチェックを外してください。'; return; }
-  const q = { ids: picked, text: $('#text').value.trim(), sort: $('#sort').value === 'oldest' ? 'oldest' : 'newest', langs: $('#lang').value.split(',') };
+  // メンバー未選択のときは、グループ欄を検索範囲として使う
+  const q = { ids: picked, text, topic, org: picked.length ? '' : $('#org').value, sort: $('#sort').value === 'oldest' ? 'oldest' : 'newest', langs: $('#lang').value.split(',') };
   $('#results').replaceChildren(); sections = [];
+  if (!picked.length) $('#results').append(el('div', { className: 'muted', style: 'margin-top:16px', textContent: '内容だけで検索中(範囲: ' + (q.org || 'すべてのグループ') + ')' + ($('#tw').checked ? '。Twitch はメンバーを選んだときだけ検索します' : '') }));
   $('#go').disabled = true;
   await Promise.all([...kinds.map(k => runKind(k, q)), ...(tw ? [runTwitch(q)] : [])]);
   $('#go').disabled = false;
@@ -597,7 +612,7 @@ async function search() {
 
 function showKey(show) { $('#keyPanel').hidden = !show; $('#app').hidden = show; }
 $('#keySave').onclick = async () => {
-  try { await api('/api/key', { key: $('#keyInput').value }); $('#keyInput').value = ''; $('#keyErr').textContent = ''; showKey(false); loadChannels(); }
+  try { await api('/api/key', { key: $('#keyInput').value }); $('#keyInput').value = ''; $('#keyErr').textContent = ''; showKey(false); loadChannels(); loadTopics(); }
   catch (e) { $('#keyErr').textContent = e.message; }
 };
 $('#keyChange').onclick = () => showKey(true);
@@ -622,7 +637,12 @@ $('#twSave').onclick = async () => {
   try { await api('/api/twitch_key', { id: $('#twId').value, secret: $('#twSecret').value }); $('#twSecret').value = ''; $('#twErr').textContent = ''; hasTwitch = true; renderTwitch(); }
   catch (e) { $('#twErr').textContent = e.message; }
 };
-$('#text').onkeydown = e => { if (e.key === 'Enter') search(); };
+$('#text').onkeydown = $('#topic').onkeydown = e => { if (e.key === 'Enter') search(); };
+// トピック(Holodex が動画に付けているゲーム名などのタグ)の入力候補。取れなければ欄ごと出さない
+async function loadTopics() {
+  try { const t = (await api('/api/topics')).items; if (!t.length) return;
+    $('#topics').replaceChildren(...t.map(id => el('option', { value: id }))); $('#topic').hidden = false; } catch {}
+}
 
 (async () => {
   const cfg = await api('/api/config');
@@ -630,7 +650,7 @@ $('#text').onkeydown = e => { if (e.key === 'Enter') search(); };
   $('#tw').checked = store.get('tw', false);
   showKey(!cfg.hasKey);
   renderPicked(); renderCount();
-  if (cfg.hasKey) loadChannels();
+  if (cfg.hasKey) { loadChannels(); loadTopics(); }
 })();
 </script>
 </body>
