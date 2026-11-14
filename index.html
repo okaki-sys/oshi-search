@@ -54,6 +54,13 @@ label{display:inline-flex;gap:5px;align-items:center;cursor:pointer}
 .meta{padding:8px 10px 10px}
 .title{font-weight:600;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .sub{color:var(--sub);font-size:12px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tpwrap{position:relative;display:inline-flex;min-width:280px}
+.tpwrap input{flex:1;min-width:0;width:100%;padding-right:34px}
+#topicClear{position:absolute;right:4px;top:50%;transform:translateY(-50%);border:0;background:none;padding:4px 8px;font-size:16px;color:var(--sub)}
+#topicList{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:20;max-height:280px;overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px #0004}
+#topicList div{padding:10px 12px;border-bottom:1px solid var(--line);cursor:pointer}
+#topicList div:last-child{border-bottom:0}
+#topicList div:hover{background:var(--accbg)}
 .alt{display:inline-block;margin-top:6px;padding:3px 10px;border:1px solid var(--line);border-radius:999px;font-size:12px;color:var(--acc)}
 .sub.info{display:flex;gap:8px;justify-content:space-between}
 .sub.info span{overflow:hidden;text-overflow:ellipsis;min-width:0}
@@ -73,7 +80,7 @@ label{display:inline-flex;gap:5px;align-items:center;cursor:pointer}
   .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
   .meta{padding:6px 8px 8px}.title{font-size:13px}.sub{font-size:11px}
   .seg button{padding:7px 9px}
-  #text,#topic{flex:1 1 100%!important}
+  #text,.tpwrap{flex:1 1 100%!important}
   #go{flex:1 1 100%;padding:11px}
 }
 </style>
@@ -121,8 +128,11 @@ label{display:inline-flex;gap:5px;align-items:center;cursor:pointer}
   <div class="row">
     <b>内容</b>
     <input type="text" id="text" placeholder="ゲーム名・企画名など(スペース区切りで複数可)" style="flex:1">
-    <input type="text" id="topic" list="topics" placeholder="トピック(任意・例: マインクラフト、雑談)" style="min-width:260px" hidden>
-    <datalist id="topics"></datalist>
+    <span class="tpwrap" id="topicWrap" hidden>
+      <input type="text" id="topic" autocomplete="off" placeholder="トピック(任意・例: マインクラフト、雑談)">
+      <button type="button" id="topicClear" title="トピックを消す" hidden>×</button>
+      <div id="topicList" hidden></div>
+    </span>
     <button class="primary" id="go">検索</button>
   </div>
   <div id="ytPanel" hidden style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
@@ -669,7 +679,10 @@ $('#twSave').onclick = async () => {
   try { await api('/api/twitch_key', { id: $('#twId').value, secret: $('#twSecret').value }); $('#twSecret').value = ''; $('#twErr').textContent = ''; hasTwitch = true; renderTwitch(); }
   catch (e) { $('#twErr').textContent = e.message; }
 };
-$('#text').onkeydown = $('#topic').onkeydown = e => { if (e.key === 'Enter') search(); };
+$('#text').onkeydown = $('#topic').onkeydown = e => { if (e.key === 'Enter') { $('#topicList').hidden = true; search(); } };
+$('#topic').onfocus = $('#topic').oninput = showTopics;
+$('#topic').onblur = () => setTimeout(() => { $('#topicList').hidden = true; }, 150);
+$('#topicClear').onclick = () => { $('#topic').value = ''; $('#topicClear').hidden = true; $('#topicList').hidden = true; };
 // トピック(Holodex が動画に付けているゲーム名などのタグ)の日本語名。キーは英数字だけにした小文字のID
 const TOPIC_JA = {
   shorts: 'ショート動画', membersonly: 'メンバー限定', talk: '雑談', singing: '歌枠', asmr: 'ASMR', musiccover: '歌ってみた', originalsong: 'オリジナル曲', karaoke: 'カラオケ',
@@ -688,14 +701,29 @@ const TOPIC_JA = {
 };
 const topicKey = id => String(id).toLowerCase().replace(/[^0-9a-z]/g, '');
 const topicLabel = id => TOPIC_JA[topicKey(id)] ? TOPIC_JA[topicKey(id)] + ' (' + id + ')' : id;
-let topicByLabel = new Map();
+let topicByLabel = new Map(), topicLabels = [];
+// 漢字の候補をひらがなでも探せるようにする読み
+const TOPIC_YOMI = { '雑談': 'ざつだん', '歌枠': 'うたわく', '歌ってみた': 'うたってみた', '曲': 'きょく', '絵描き': 'えかき', '料理': 'りょうり', '同時視聴': 'どうじしちょう', '誕生日': 'たんじょうび', '記念配信': 'きねんはいしん', '祝い': 'いわい',
+  '告知': 'こくち', '初配信': 'はつはいしん', '新衣装': 'しんいしょう', '披露目': 'ひろめ', '配信': 'はいしん', '読み': 'よみ', '朝活': 'あさかつ', '勉強': 'べんきょう', '作業': 'さぎょう', '英語': 'えいご', '凸待ち': 'とつまち', '限定': 'げんてい', '動画': 'どうが',
+  '伝説': 'でんせつ', '森': 'もり', '原神': 'げんしん', '崩壊': 'ほうかい', '鳴潮': 'めいちょう', '娘': 'むすめ', '麻雀': 'まーじゃん', '雀魂': 'じゃんたま', '将棋': 'しょうぎ', '桃鉄': 'ももてつ' };
+const topicKeyText = l => norm(l + ' ' + Object.keys(TOPIC_YOMI).filter(k => l.includes(k)).map(k => TOPIC_YOMI[k]).join(' '));
+// 候補リストは自前で表示する(スマホのブラウザによっては標準の候補選択が入力欄に入らないため)
+function showTopics() {
+  const q = norm($('#topic').value), box = $('#topicList');
+  const hit = topicLabels.filter(l => !q || topicKeyText(l).includes(q)).slice(0, 60);
+  $('#topicClear').hidden = !$('#topic').value;
+  if (!hit.length) { box.hidden = true; return; }
+  box.replaceChildren(...hit.map(l => { const d = el('div', { textContent: l }); d.onpointerdown = ev => ev.preventDefault();   // 入力欄のフォーカスを保つ
+    d.onclick = () => { $('#topic').value = l; box.hidden = true; $('#topicClear').hidden = false; $('#topic').blur(); }; return d; }));
+  box.hidden = false;
+}
 // 入力欄の文字列(候補から選んだ日本語名でも、IDの直接入力でも)を Holodex のトピックIDに直す
 const topicId = () => { const v = $('#topic').value.trim(); if (!v) return ''; if (topicByLabel.has(v)) return topicByLabel.get(v); const m = /\(([^()]+)\)\s*$/.exec(v); return m ? m[1] : v; };
 // 入力候補。取れなければ欄ごと出さない
 async function loadTopics() {
   try { const t = (await api('/api/topics')).items; if (!t.length) return;
     topicByLabel = new Map(t.map(id => [topicLabel(id), id]));
-    $('#topics').replaceChildren(...t.map(id => el('option', { value: topicLabel(id) }))); $('#topic').hidden = false; } catch {}
+    topicLabels = t.map(topicLabel); $('#topicWrap').hidden = false; } catch {}
 }
 (async () => {
   const cfg = await api('/api/config');
