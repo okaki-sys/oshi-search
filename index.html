@@ -370,9 +370,26 @@ async function api(path, body) {
       let res; try { res = await fetch(YT + '/search?' + new URLSearchParams(p)); } catch { fail('YouTube に接続できません。'); }
       if (!res.ok) { const t = await res.text(); fail(/quota/i.test(t) ? 'YouTube 検索の本日分の利用枠(1日100回)を使い切りました。明日また使えます。' : 'YouTube 検索に失敗しました (HTTP ' + res.status + ')。'); }
       const j = await res.json();
-      return { next: j.nextPageToken || '', items: (j.items || []).filter(it => it.id && it.id.videoId).map(it => { const sn = it.snippet || {}; return {
-        id: it.id.videoId, title: sn.title || '', status: 'past', type: 'clip', topic: '', time: sn.publishedAt || '', duration: 0, views: null,
-        channel: { id: sn.channelId || '', name: sn.channelTitle || '', photo: '' }, mentions: [] }; }) };
+      const items = (j.items || []).filter(it => it.id && it.id.videoId).map(it => { const sn = it.snippet || {}; return {
+        id: it.id.videoId, title: sn.title || '', desc: sn.description || '', status: 'past', type: 'clip', topic: '', time: sn.publishedAt || '', duration: 0, views: null,
+        channel: { id: sn.channelId || '', name: sn.channelTitle || '', photo: '' }, mentions: [] }; });
+      // 概要欄の全文・タグ・長さ・再生回数をまとめて取得(50件で1ユニット)。名前での絞り込みに使う
+      try {
+        if (items.length) {
+          const r2 = await fetch(YT + '/videos?' + new URLSearchParams({ part: 'snippet,contentDetails,statistics', id: items.map(v => v.id).join(','), key: cfg.ytKey }));
+          if (r2.ok) {
+            const byId = new Map(((await r2.json()).items || []).map(it => [it.id, it]));
+            for (const v of items) {
+              const d = byId.get(v.id); if (!d) continue;
+              const sn = d.snippet || {}; v.desc = (sn.description || '') + ' ' + (sn.tags || []).join(' ');
+              const m = /^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec((d.contentDetails || {}).duration || '');
+              if (m) v.duration = (+m[1] || 0) * 86400 + (+m[2] || 0) * 3600 + (+m[3] || 0) * 60 + (+m[4] || 0);
+              const n = parseInt((d.statistics || {}).viewCount, 10); if (Number.isFinite(n)) { v.views = n; viewCache.set(v.id, n); }
+            }
+          }
+        }
+      } catch {}
+      return { next: j.nextPageToken || '', items };
     }
   }
   fail('not found');
@@ -622,29 +639,47 @@ const decodeHtml = t => { const d = document.createElement('textarea'); d.innerH
 // 切り抜きのタイトルは短い呼び名で書かれることが多いので、「フレン・E・ルスタリオ」は「フレン」で探す
 const ytName = id => { const n = shortName((known[id] || {}).name || '').replace(/\s*[-–|].*$/, ''), first = n.split(/[・･]/)[0].trim(); return first.length >= 2 ? first : n; };
 const ytQuery = q => [...q.ids.map(id => ytName(id)), q.text, '切り抜き'].filter(Boolean).join(' ');
+// 名前の一部でも当たるように、「七瀬すず菜」を「七瀬」「すず菜」にも分ける(漢字とかなの境目で2分割)
+function clipTokens(id) {
+  const set = new Set(nameTokens(id)), jp = norm(shortName((known[id] || {}).name || '').replace(/\s*[-–|].*$/, ''));
+  const m = /^([々一-鿿]{2,})([ぁ-ゖー].+)$/.exec(jp) || /^([ぁ-ゖー]{2,})([々一-鿿].+)$/.exec(jp);
+  if (m) [m[1], m[2]].forEach(t => { if (t.length >= 2) set.add(t); });
+  set.add(norm(ytName(id)));
+  return [...set].filter(Boolean);
+}
 async function runYtClip(q) {
   const small = el('small', { textContent: '検索中…' }), head = el('h2', {}, 'YouTube 切り抜き(YouTube検索) ', small);
-  const note = el('div', { className: 'muted', textContent: '検索語: ' + ytQuery(q) + ' ／ YouTube の検索結果そのままなので、関係の薄い動画が混ざることがあります' });
+  const note = el('div', { className: 'muted' });
   const grid = el('div', { className: 'grid' }), more = el('div', { className: 'more' });
   $('#results').append(el('section', {}, head, note, grid, more));
   const sec = { kind: 'ytclip', items: [], grid, done: false };
   sections.push(sec);
-  let token = '', end = false, busy = false;
-  const controls = () => { more.replaceChildren(); if (!busy && !end) { const b = el('button', { textContent: 'さらに読み込む(検索1回分)' }); b.onclick = () => sec.loadTo(sec.items.length + 50); more.append(b); } };
-  // 1回の検索で最大50件。YouTube の検索は1日100回までなので、一度に読むのは4回(約200件)まで
-  sec.loadTo = async n => {
+  let all = [], strict = true, token = '', end = false, busy = false;
+  const tokens = q.ids.map(clipTokens);
+  // 絞り込み: 選んだ全員の名前と「内容」の語が、タイトル・概要欄・タグのどこかにあるものだけ残す
+  const hit = v => { const t = v.title + ' ' + (v.desc || ''); return tokens.every(ts => titleHas(t, ts)) && textHit(t, q.text); };
+  const apply = () => {
+    sec.items = strict ? all.filter(hit) : all; sec.done = true; paint(sec);
+    const cut = all.length - sec.items.length;
+    small.textContent = sec.items.length + '件';
+    note.replaceChildren('検索語: ' + ytQuery(q) + ' ／ ' + (strict ? '名前' + (q.text ? 'と内容' : '') + 'がタイトル・概要欄・タグにあるものだけ表示' + (cut ? '(' + cut + '件を除外) ' : ' ') : 'YouTube の検索結果をすべて表示中 '));
+    if (strict ? cut > 0 : true) { const b = el('button', { textContent: strict ? '除外した分も表示' : '名前が一致するものだけに戻す', style: 'padding:2px 10px' }); b.onclick = () => { strict = !strict; apply(); }; note.append(b); }
+  };
+  const controls = () => { more.replaceChildren(); if (!busy && !end) { const b = el('button', { textContent: 'さらに読み込む(検索1回分)' }); b.onclick = () => sec.loadTo(sec.items.length + 1, 1); more.append(b); } };
+  // 1回の検索で最大50件。YouTube の検索は1日100回までなので、一度に読むのは4回まで
+  sec.loadTo = async (n, max = 4) => {
     if (busy || end) return;
     busy = true; controls();
     try {
-      for (let i = 0; i < 4 && !end && sec.items.length < n; i++) {
+      for (let i = 0; i < max && !end && sec.items.length < n; i++) {
         const r = await api('/api/ytsearch', { q: ytQuery(q), token, from: q.range.from, to: q.range.to });
-        const have = new Set(sec.items.map(v => v.id));
-        sec.items.push(...r.items.filter(v => !have.has(v.id)).map(v => ({ ...v, title: decodeHtml(v.title) }))); sec.done = true;
+        const have = new Set(all.map(v => v.id));
+        all.push(...r.items.filter(v => !have.has(v.id)).map(v => ({ ...v, title: decodeHtml(v.title) })));
         token = r.next || ''; end = !token || !r.items.length;
-        paint(sec); fillViews(sec); small.textContent = sec.items.length + '件';
+        apply(); fillViews(sec);
       }
-    } catch (e) { more.append(el('div', { className: 'err', textContent: e.message })); small.textContent = sec.items.length + '件'; busy = false; return; }
-    busy = false; small.textContent = sec.items.length + '件'; controls();
+    } catch (e) { busy = false; apply(); controls(); more.append(el('div', { className: 'err', textContent: e.message })); return; }
+    busy = false; apply(); controls();
   };
   await sec.loadTo(targetCount());
 }
