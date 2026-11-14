@@ -71,6 +71,8 @@ label{display:inline-flex;gap:5px;align-items:center;cursor:pointer}
   .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
   .meta{padding:6px 8px 8px}.title{font-size:13px}.sub{font-size:11px}
   .seg button{padding:7px 9px}
+  #text,#topic{flex:1 1 100%!important}
+  #go{flex:1 1 100%;padding:11px}
 }
 </style>
 </head>
@@ -116,7 +118,7 @@ label{display:inline-flex;gap:5px;align-items:center;cursor:pointer}
   <div class="row">
     <b>内容</b>
     <input type="text" id="text" placeholder="ゲーム名・企画名など(スペース区切りで複数可)" style="flex:1">
-    <input type="text" id="topic" list="topics" placeholder="トピック(任意・例: Apex_Legends)" hidden>
+    <input type="text" id="topic" list="topics" placeholder="トピック(任意・例: マインクラフト、雑談)" style="min-width:260px" hidden>
     <datalist id="topics"></datalist>
     <button class="primary" id="go">検索</button>
   </div>
@@ -595,7 +597,7 @@ async function runTwitch(q) {
 
 async function search() {
   $('#err').textContent = '';
-  const text = $('#text').value.trim(), topic = $('#topic').value.trim();
+  const text = $('#text').value.trim(), topic = topicId();
   if (!picked.length && !text && !topic) { $('#err').textContent = 'メンバーを選ぶか、内容(ゲーム名・企画名など)を入力してください。'; return; }
   const kinds = [...document.querySelectorAll('.kind:checked')].map(c => c.value);
   const tw = $('#tw').checked && picked.length > 0;   // Twitch はメンバー指定があるときだけ
@@ -638,12 +640,33 @@ $('#twSave').onclick = async () => {
   catch (e) { $('#twErr').textContent = e.message; }
 };
 $('#text').onkeydown = $('#topic').onkeydown = e => { if (e.key === 'Enter') search(); };
-// トピック(Holodex が動画に付けているゲーム名などのタグ)の入力候補。取れなければ欄ごと出さない
+// トピック(Holodex が動画に付けているゲーム名などのタグ)の日本語名。キーは英数字だけにした小文字のID
+const TOPIC_JA = {
+  shorts: 'ショート動画', membersonly: 'メンバー限定', talk: '雑談', singing: '歌枠', asmr: 'ASMR', musiccover: '歌ってみた', originalsong: 'オリジナル曲', karaoke: 'カラオケ',
+  drawing: 'お絵描き', cooking: '料理', watchalong: '同時視聴', birthday: '誕生日', anniversary: '記念配信', celebration: 'お祝い', announce: '告知', debutstream: '初配信', debut: '初配信',
+  outfitreveal: '新衣装お披露目', '3dstream': '3D配信', superchatreading: 'スパチャ読み', morning: '朝活', study: '勉強・作業', english: '英語', totsu: '凸待ち', marshmallow: 'マシュマロ', horror: 'ホラー', retro: 'レトロゲーム',
+  minecraft: 'マインクラフト', apex: 'Apex Legends(エーペックス)', apexlegends: 'Apex Legends(エーペックス)', valorant: 'VALORANT(ヴァロラント)', pokemon: 'ポケモン', mariokart: 'マリオカート', mario: 'マリオ',
+  supermario: 'スーパーマリオ', smash: 'スマブラ', supersmashbros: 'スマブラ', splatoon: 'スプラトゥーン', zelda: 'ゼルダの伝説', kirby: 'カービィ', animalcrossing: 'どうぶつの森', ringfit: 'リングフィット', ringfitadventure: 'リングフィット',
+  monsterhunter: 'モンスターハンター', streetfighter: 'ストリートファイター', sf6: 'スト6', streetfighter6: 'スト6', leagueoflegends: 'LoL(リーグ・オブ・レジェンド)', lol: 'LoL(リーグ・オブ・レジェンド)', overwatch: 'オーバーウォッチ', overwatch2: 'オーバーウォッチ2',
+  fortnite: 'フォートナイト', pubg: 'PUBG', gta: 'グラセフ(GTA)', gtav: 'グラセフ(GTA5)', gta5: 'グラセフ(GTA5)', ark: 'ARK', rust: 'Rust', escapefromtarkov: 'タルコフ', tarkov: 'タルコフ', deadbydaylight: 'デッドバイデイライト(DbD)', dbd: 'デッドバイデイライト(DbD)',
+  amongus: 'Among Us(アモアス)', fallguys: 'フォールガイズ', phasmophobia: 'ファスモフォビア', lethalcompany: 'リーサルカンパニー', palworld: 'パルワールド', helldivers2: 'ヘルダイバー2', raft: 'Raft', '7daystodie': '7 Days to Die', onlyup: 'Only Up!', picopark: 'ピコパーク', ittakestwo: 'It Takes Two',
+  eldenring: 'エルデンリング', darksouls: 'ダークソウル', sekiro: 'SEKIRO', bloodborne: 'ブラッドボーン', armoredcore: 'アーマード・コア', residentevil: 'バイオハザード', biohazard: 'バイオハザード', finalfantasy: 'ファイナルファンタジー', dragonquest: 'ドラゴンクエスト',
+  persona: 'ペルソナ', nier: 'ニーア', undertale: 'アンダーテール', detroit: 'デトロイト', detroitbecomehuman: 'デトロイト', littlenightmares: 'リトルナイトメア', cyberpunk2077: 'サイバーパンク2077', skyrim: 'スカイリム', fallout: 'フォールアウト',
+  genshinimpact: '原神', genshin: '原神', honkaistarrail: '崩壊:スターレイル', zenlesszonezero: 'ゼンレスゾーンゼロ', wutheringwaves: '鳴潮', bluearchive: 'ブルーアーカイブ', arknights: 'アークナイツ', umamusume: 'ウマ娘', projectsekai: 'プロセカ', idolmaster: 'アイドルマスター',
+  fgo: 'FGO', fategrandorder: 'FGO', granbluefantasy: 'グランブルーファンタジー', mahjong: '麻雀', mahjongsoul: '雀魂', poker: 'ポーカー', chess: 'チェス', shogi: '将棋', tetris: 'テトリス', puyopuyo: 'ぷよぷよ', geoguessr: 'GeoGuessr', holocure: 'HoloCure',
+  powerpros: 'パワプロ', pawapuro: 'パワプロ', momotetsu: '桃鉄', momotarodentetsu: '桃鉄', marioparty: 'マリオパーティ', pikmin: 'ピクミン', terraria: 'テラリア', stardewvalley: 'スターデューバレー', eurotrucksimulator2: 'ユーロトラック', vrchat: 'VRChat', craftopia: 'クラフトピア',
+};
+const topicKey = id => String(id).toLowerCase().replace(/[^0-9a-z]/g, '');
+const topicLabel = id => TOPIC_JA[topicKey(id)] ? TOPIC_JA[topicKey(id)] + ' (' + id + ')' : id;
+let topicByLabel = new Map();
+// 入力欄の文字列(候補から選んだ日本語名でも、IDの直接入力でも)を Holodex のトピックIDに直す
+const topicId = () => { const v = $('#topic').value.trim(); if (!v) return ''; if (topicByLabel.has(v)) return topicByLabel.get(v); const m = /\(([^()]+)\)\s*$/.exec(v); return m ? m[1] : v; };
+// 入力候補。取れなければ欄ごと出さない
 async function loadTopics() {
   try { const t = (await api('/api/topics')).items; if (!t.length) return;
-    $('#topics').replaceChildren(...t.map(id => el('option', { value: id }))); $('#topic').hidden = false; } catch {}
+    topicByLabel = new Map(t.map(id => [topicLabel(id), id]));
+    $('#topics').replaceChildren(...t.map(id => el('option', { value: topicLabel(id) }))); $('#topic').hidden = false; } catch {}
 }
-
 (async () => {
   const cfg = await api('/api/config');
   hasTwitch = cfg.hasTwitch; hasYoutube = cfg.hasYoutube;
