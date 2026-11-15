@@ -348,7 +348,7 @@ async function api(path, body) {
     case '/api/topics': { try { const t = await hx('/topics'); return { items: t.filter(x => x && x.id).sort((a, b) => (b.count || 0) - (a.count || 0)).map(x => x.id).slice(0, 3000) }; } catch { return { items: [] }; } }
     case '/api/search': {
       const ids = (body.ids || []).filter(Boolean).map(String), text = String(body.text || '').trim(), org = String(body.org || '').trim(), topic = String(body.topic || '').trim();
-      if (!ids.length && !text && !topic) fail('メンバーを選ぶか、内容(キーワードかトピック)を入力してください。');
+      if (!ids.length && !text && !topic && !org) fail('メンバーかグループを選ぶか、内容(キーワードかトピック)を入力してください。');
       if (body.kind === 'live') return searchLive(ids, org, topic);
       return searchIndexed(ids, body.kind === 'archive' ? 'stream' : 'clip', text, +body.offset || 0, body.sort, body.langs || [], org, topic);
     }
@@ -432,7 +432,7 @@ function matchScore(c, q) {
 
 function renderPicked() {
   const box = $('#picked'); box.replaceChildren();
-  if (!picked.length) box.append(el('span', { className: 'muted', textContent: '未選択。メンバーを選ばずに「内容」だけで検索することもできます(範囲は上のグループ欄)' }));
+  if (!picked.length) { const o = $('#org').value; box.append(el('span', { className: 'muted', textContent: '未選択 → ' + (o ? 'グループ「' + o + '」全体が検索対象になります' : 'すべてのグループが検索対象になります(「内容」の入力が必要)') + '。グループは上の欄で切り替えられます' })); }
   picked.forEach(id => {
     const c = known[id] || { name: id, photo: '' };
     const x = el('button', { textContent: '×', title: '外す' });
@@ -770,21 +770,21 @@ async function runTwitch(q) {
 async function search() {
   $('#err').textContent = '';
   const text = $('#text').value.trim(), topic = topicId();
-  if (!picked.length && !text && !topic) { $('#err').textContent = 'メンバーを選ぶか、内容(ゲーム名・企画名など)を入力してください。'; return; }
+  if (!picked.length && !text && !topic && !$('#org').value) { $('#err').textContent = 'メンバーかグループを選ぶか、内容(ゲーム名・企画名など)を入力してください。'; return; }
   const kinds = [...document.querySelectorAll('.kind:checked')].map(c => c.value);
   const tw = $('#tw').checked && picked.length > 0;   // Twitch はメンバー指定があるときだけ
   const ytc = $('#ytc').checked;
   if (ytc && !hasYoutube) { $('#ytPanel').hidden = false; $('#err').textContent = '「切り抜き(YouTube検索)」には YouTube の APIキーが必要です。下の欄で設定するか、チェックを外してください。'; return; }
-  if (ytc && !picked.length && !text) { $('#err').textContent = '「切り抜き(YouTube検索)」は、メンバーを選ぶか「内容」を入力したときに使えます。'; return; }
+  if (ytc && !picked.length && !text && kinds.length + (tw ? 1 : 0) === 0) { $('#err').textContent = '「切り抜き(YouTube検索)」は、メンバーを選ぶか「内容」を入力したときに使えます。'; return; }
   if (!kinds.length && !tw && !ytc) { $('#err').textContent = $('#tw').checked && !picked.length ? 'Twitch はメンバーを選んだときだけ検索できます。YouTube の対象を選ぶか、メンバーを選んでください。' : '対象を1つ以上選んでください。'; return; }
   if (tw && !hasTwitch) { $('#err').textContent = 'Twitch のキーを設定するか、Twitch のチェックを外してください。'; return; }
   // メンバー未選択のときは、グループ欄を検索範囲として使う
   const q = { ids: picked, text, topic, org: picked.length ? '' : $('#org').value, sort: $('#sort').value === 'oldest' ? 'oldest' : 'newest', userSort: $('#sort').value, range: getRange(), langs: $('#lang').value.split(',') };
   if (q.range.from != null && q.range.to != null && q.range.from > q.range.to) { $('#err').textContent = '期間の開始が終了より後になっています。'; return; }
   $('#results').replaceChildren(); sections = [];
-  if (!picked.length) $('#results').append(el('div', { className: 'muted', style: 'margin-top:16px', textContent: '内容だけで検索中(範囲: ' + (q.org || 'すべてのグループ') + ')' + ($('#tw').checked ? '。Twitch はメンバーを選んだときだけ検索します' : '') }));
+  if (!picked.length) $('#results').append(el('div', { className: 'muted', style: 'margin-top:16px', textContent: (q.org ? 'グループ「' + q.org + '」全体' : 'すべてのグループ') + 'から検索' + (text || topic ? '(内容で絞り込み)' : '') + ($('#tw').checked ? '。Twitch はメンバーを選んだときだけ検索します' : '') }));
   $('#go').disabled = true;
-  await Promise.all([...kinds.map(k => runKind(k, q)), ...(ytc ? [runYtClip(q)] : []), ...(tw ? [runTwitch(q)] : [])]);
+  await Promise.all([...kinds.map(k => runKind(k, q)), ...(ytc && (picked.length || text) ? [runYtClip(q)] : []), ...(tw ? [runTwitch(q)] : [])]);
   $('#go').disabled = false;
 }
 
@@ -794,7 +794,7 @@ $('#keySave').onclick = async () => {
   catch (e) { $('#keyErr').textContent = e.message; }
 };
 $('#keyChange').onclick = () => showKey(true);
-$('#org').onchange = () => { store.set('org', $('#org').value); renderMembers(); };
+$('#org').onchange = () => { store.set('org', $('#org').value); renderMembers(); renderPicked(); };
 $('#reload').onclick = () => loadChannels(true);
 $('#filter').oninput = renderMembers;
 $('#showInactive').onchange = renderMembers;
